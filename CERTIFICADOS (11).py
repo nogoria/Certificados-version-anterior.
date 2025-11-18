@@ -149,6 +149,7 @@ class RegexExtractorApp:
         self.btn_expand_excel.pack(side="left", padx=5)
         tk.Button(frame_btns, text="Separar PDFs", command=self.separar_pdfs).pack(side="left", padx=5)
         tk.Button(frame_btns, text="Renombrar PDFs", command=self.renombrar_pdfs).pack(side="left", padx=5)
+        tk.Button(frame_btns, text="Cifrar PDFs", command=self.cifrar_pdfs).pack(side="left", padx=5)
 
         self.progress = ttk.Progressbar(frame_principal, length=450, mode="determinate")
         self.progress.pack(pady=5)
@@ -2637,6 +2638,145 @@ class RegexExtractorApp:
 
         except Exception as e:
             messagebox.showerror("Error", f"Error al renombrar PDFs:\n{e}")
+
+    def cifrar_pdfs(self):
+        if not PYPDF2_AVAILABLE:
+            messagebox.showerror("Error", "La funcionalidad de cifrado requiere PyPDF2.")
+            return
+
+        try:
+            excel_path = filedialog.askopenfilename(
+                title="Seleccionar Excel procesado",
+                filetypes=[("Archivos Excel", "*.xlsx *.xls")]
+            )
+            if not excel_path:
+                return
+
+            df = pd.read_excel(excel_path, dtype=str)
+            df.columns = df.columns.str.strip()
+
+            if "Archivo" not in df.columns:
+                messagebox.showerror(
+                    "Error",
+                    "El archivo seleccionado debe contener una columna llamada 'Archivo' con el nombre de cada PDF.",
+                )
+                return
+
+            columnas = [c for c in df.columns if c != "Archivo"]
+            if not columnas:
+                messagebox.showwarning("Advertencia", "No hay columnas disponibles para utilizar como contraseña.")
+                return
+
+            folder = filedialog.askdirectory(title="Seleccionar carpeta con los PDFs a cifrar")
+            if not folder:
+                return
+
+            select_win = tk.Toplevel(self.root)
+            select_win.title("Seleccionar columna de contraseña")
+
+            tk.Label(
+                select_win,
+                text="Seleccione la columna de la base que se utilizará como contraseña para cada PDF",
+                wraplength=380,
+            ).pack(padx=10, pady=10)
+
+            var_col = tk.StringVar(value=columnas[0])
+            for col in columnas:
+                tk.Radiobutton(select_win, text=col, value=col, variable=var_col, anchor="w", justify="left").pack(
+                    fill="x", padx=15, pady=2
+                )
+
+            def ejecutar_cifrado():
+                seleccionada = var_col.get()
+                if not seleccionada:
+                    messagebox.showwarning("Advertencia", "Debe seleccionar una columna para las contraseñas.")
+                    return
+                self._aplicar_cifrado(folder, df, seleccionada)
+                select_win.destroy()
+
+            tk.Button(select_win, text="Cifrar PDFs", command=ejecutar_cifrado).pack(pady=10)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo iniciar el cifrado:\n{e}")
+
+    def _aplicar_cifrado(self, folder, df, columna_password):
+        try:
+            archivos = [f for f in os.listdir(folder) if f.lower().endswith(".pdf")]
+            if not archivos:
+                messagebox.showwarning("Advertencia", "No se encontraron PDFs en la carpeta seleccionada.")
+                return
+
+            df["Archivo_normalizado"] = (
+                df["Archivo"].astype(str).str.strip().str.replace(".pdf", "", case=False)
+            ).str.lower()
+
+            procesados = 0
+            sin_match = []
+            sin_password = []
+            errores = []
+
+            for file in archivos:
+                nombre_base = os.path.splitext(file)[0].strip().lower()
+                fila = df[df["Archivo_normalizado"] == nombre_base]
+                if fila.empty:
+                    sin_match.append(file)
+                    continue
+
+                password = str(fila.iloc[0][columna_password]).strip()
+                if not password:
+                    sin_password.append(file)
+                    continue
+
+                ruta_original = os.path.join(folder, file)
+                ruta_temp = ruta_original + ".tmp"
+
+                try:
+                    reader = PdfReader(ruta_original)
+                    if getattr(reader, "is_encrypted", False):
+                        password_existente = self.get_password_for_file(file)
+                        if password_existente:
+                            try:
+                                reader.decrypt(password_existente)
+                            except Exception:
+                                errores.append((file, "No se pudo descifrar con la contraseña registrada."))
+                                continue
+                        else:
+                            errores.append((file, "El PDF ya está cifrado y no se tiene la contraseña actual."))
+                            continue
+
+                    writer = PdfWriter()
+                    for page in reader.pages:
+                        writer.add_page(page)
+
+                    writer.encrypt(user_password=password, owner_password=password)
+
+                    with open(ruta_temp, "wb") as salida:
+                        writer.write(salida)
+
+                    os.replace(ruta_temp, ruta_original)
+                    procesados += 1
+
+                except Exception as e_pdf:
+                    if os.path.exists(ruta_temp):
+                        os.remove(ruta_temp)
+                    errores.append((file, str(e_pdf)))
+
+            resumen = [f"✅ PDFs cifrados: {procesados}"]
+            if sin_match:
+                resumen.append(f"⚠️ Sin coincidencia en Excel: {len(sin_match)}")
+            if sin_password:
+                resumen.append(f"⚠️ Sin contraseña en la columna seleccionada: {len(sin_password)}")
+            if errores:
+                resumen.append(f"⚠️ Errores durante el cifrado: {len(errores)}")
+
+            detalle = "\n".join(resumen)
+            if errores:
+                detalle += "\n" + "\n".join([f"- {f}: {err}" for f, err in errores[:10]])
+
+            messagebox.showinfo("Cifrado finalizado", detalle)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al cifrar PDFs:\n{e}")
 
     def open_config_window(self):
         ConfigWindow(self)
